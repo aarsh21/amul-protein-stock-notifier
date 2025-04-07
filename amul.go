@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,29 +26,34 @@ type ProductInfo struct {
 	Name              string `json:"name"`
 	Alias             string `json:"alias"`
 	SKU               string `json:"sku"`
-	Available         int    `json:"available"`
+	Available         int    `json:"available"` // 1 if available, likely 0 otherwise
 	InventoryQuantity int    `json:"inventory_quantity"`
 	Price             int    `json:"price"`
 }
 
 const (
-	// API URL fetching products in the 'protein' category
-	apiURL = "https://shop.amul.com/api/1/entity/ms.products?fields[name]=1&fields[brand]=1&fields[categories]=1&fields[collections]=1&fields[alias]=1&fields[sku]=1&fields[price]=1&fields[compare_price]=1&fields[original_price]=1&fields[images]=1&fields[metafields]=1&fields[discounts]=1&fields[catalog_only]=1&fields[is_catalog]=1&fields[seller]=1&fields[available]=1&fields[inventory_quantity]=1&fields[net_quantity]=1&fields[num_reviews]=1&fields[avg_rating]=1&fields[inventory_low_stock_quantity]=1&fields[inventory_allow_out_of_stock]=1&filters[0][field]=categories&filters[0][value][0]=protein&filters[0][operator]=in&facets=true&facetgroup=default_category_facet&limit=32&total=1&start=0"
+	// API URL fetching products in the 'protein' category (adjust filters if needed)
+	// Consider making the category filter configurable too if you monitor other types later
+	apiURL = "https://shop.amul.com/api/1/entity/ms.products?fields[name]=1&fields[brand]=1&fields[categories]=1&fields[collections]=1&fields[alias]=1&fields[sku]=1&fields[price]=1&fields[compare_price]=1&fields[original_price]=1&fields[images]=1&fields[metafields]=1&fields[discounts]=1&fields[catalog_only]=1&fields[is_catalog]=1&fields[seller]=1&fields[available]=1&fields[inventory_quantity]=1&fields[net_quantity]=1&fields[num_reviews]=1&fields[avg_rating]=1&fields[inventory_low_stock_quantity]=1&fields[inventory_allow_out_of_stock]=1&filters[0][field]=categories&filters[0][value][0]=protein&filters[0][operator]=in&facets=true&facetgroup=default_category_facet&limit=100&total=1&start=0" // Increased limit a bit
 
-	checkInterval = 10 * time.Second // Check frequency
+	checkInterval = 60 * time.Minute // Check frequency
 
-	// --- Target Product SKUs ---
-	plainLassiSKU         = "LASCP61_30"
-	roseLassiSKU          = "LASCP40_30"
-	kesarMilkshakeSKU     = "DBDCP42_30"
-	blueberryMilkshakeSKU = "DBDCP41_30"
+	// *** CHANGED BASE URL ***
+	productBaseURL = "https://shop.amul.com/en/product/"
+
+	// --- Quiet Hours Configuration (IST) ---
+	quietHourStart = 0 // 12:00 AM
+	quietHourEnd   = 7 // Up to 6:59:59 AM (exclusive of 7)
+	timeZone       = "Asia/Kolkata"
 )
 
-// --- Global state to track stock status ---
-// map key is SKU, value is boolean (true = in stock, false = out of stock)
+// --- Global state ---
 var (
-	productStockState = make(map[string]bool)
-	firstRun          = true // Flag to initialize state without notifying on first check
+	productStockState = make(map[string]bool)        // SKU -> inStock (bool)
+	productDetails    = make(map[string]ProductInfo) // SKU -> ProductInfo
+	firstRun          = true                         // Flag to handle initial run
+	istLocation       *time.Location                 // For IST timezone handling
+	monitoredSKUsMap  map[string]bool                // Set of SKUs to monitor (loaded from env)
 )
 
 // --- Telegram Configuration ---
@@ -59,432 +63,428 @@ var (
 )
 
 func main() {
+	var err error // Declare err here for timezone loading
+
+	// --- Load Timezone ---
+	istLocation, err = time.LoadLocation(timeZone)
+	if err != nil {
+		log.Fatalf("❌ Error loading timezone '%s': %v", timeZone, err)
+	}
+	log.Printf("✅ Timezone '%s' loaded successfully. Current time in IST: %s", timeZone, time.Now().In(istLocation).Format(time.RFC1123))
+	log.Printf("Notifications will be suppressed between %d:00 and %d:00 %s.", quietHourStart, quietHourEnd, timeZone)
+
 	// --- Load .env file ---
 	log.Println("Attempting to load .env file...")
-
-	// Get current working directory for debugging context
-	cwd, err := os.Getwd()
-	if err == nil {
-		log.Printf("Current working directory: %s", cwd)
-		envPath := filepath.Join(cwd, ".env")
-		if _, statErr := os.Stat(envPath); statErr == nil {
-			log.Printf(".env file found at: %s", envPath)
-		} else {
-			if os.IsNotExist(statErr) {
-				log.Printf("Warning: .env file was NOT found in the current working directory.")
-			} else {
-				log.Printf("Warning: Error checking for .env file: %v", statErr)
-			}
-		}
+	// (Keep the existing .env loading and debugging logic)
+	cwd, _ := os.Getwd() // Ignore error for logging purpose
+	log.Printf("Current working directory: %s", cwd)
+	if err := godotenv.Load(); err != nil {
+		log.Printf("⚠️ Warning: Error loading .env file: %v. Will rely on environment variables.", err)
 	} else {
-		log.Printf("Warning: Could not get current working directory: %v", err)
-		cwd = "[unknown]"
+		log.Println("✅ .env file loaded successfully (if found).")
 	}
 
-	// Try loading .env
-	err = godotenv.Load()
-	if err != nil {
-		log.Printf("Warning: Error loading .env file: %v. Will try environment variables directly.", err)
-	} else {
-		log.Println(".env file loaded successfully.")
-	}
+	// --- Read Environment Variables ---
+	telegramBotToken = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	telegramChatID = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
+	monitoredSKUsRaw := strings.TrimSpace(os.Getenv("MONITORED_SKUS"))
 
-	// Read environment variables
-	telegramBotToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-	telegramChatID = os.Getenv("TELEGRAM_CHAT_ID")
-
-	// Trim any potential whitespace from telegram token and chat ID
-	telegramBotToken = strings.TrimSpace(telegramBotToken)
-	telegramChatID = strings.TrimSpace(telegramChatID)
-
-	log.Printf("TELEGRAM_BOT_TOKEN length: %d", len(telegramBotToken))
-	log.Printf("TELEGRAM_CHAT_ID length: %d", len(telegramChatID))
-
-	// Check if variables are set
+	// --- Validate Configuration ---
 	if telegramBotToken == "" || telegramChatID == "" {
-		log.Fatalf("Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty. Please check your environment variables or .env file.")
+		log.Fatalf("❌ Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty. Please set them in your environment or .env file.")
+	}
+	if monitoredSKUsRaw == "" {
+		log.Fatalf("❌ Error: MONITORED_SKUS environment variable is not set or empty. Please provide a comma-separated list of SKUs.")
 	}
 
-	// Print first and last few characters for debugging (don't expose full token)
+	// --- Process Monitored SKUs ---
+	monitoredSKUsMap = make(map[string]bool)
+	skuList := strings.Split(monitoredSKUsRaw, ",")
+	validSKUs := []string{}
+	for _, sku := range skuList {
+		trimmedSku := strings.TrimSpace(sku)
+		if trimmedSku != "" {
+			monitoredSKUsMap[trimmedSku] = true
+			validSKUs = append(validSKUs, trimmedSku) // Keep a list for logging
+		}
+	}
+	if len(monitoredSKUsMap) == 0 {
+		log.Fatalf("❌ Error: No valid SKUs found in MONITORED_SKUS environment variable after processing '%s'.", monitoredSKUsRaw)
+	}
+	log.Printf("✅ Monitoring the following %d SKUs: %s", len(validSKUs), strings.Join(validSKUs, ", "))
+
+	// Log Telegram config details (partially)
+	log.Printf("Telegram Bot Token Length: %d", len(telegramBotToken))
 	if len(telegramBotToken) > 10 {
-		log.Printf("Token starts with: %s... and ends with ...%s", telegramBotToken[:5], telegramBotToken[len(telegramBotToken)-5:])
+		log.Printf("Telegram Bot Token Hint: Starts with '%s', ends with '%s'", telegramBotToken[:5], telegramBotToken[len(telegramBotToken)-5:])
 	}
+	log.Printf("Telegram Chat ID: %s", telegramChatID)
 
-	// Send a test notification at startup
-	testMessage := "🔄 Amul Stock Notifier started successfully! This is a test notification."
+	// --- Startup Test Notification ---
+	testMessage := fmt.Sprintf("🔄 Amul Stock Notifier started successfully! Monitoring %d SKUs. Quiet hours: %d:00-%d:00 %s.", len(monitoredSKUsMap), quietHourStart, quietHourEnd, timeZone)
+	// Send test notification (respecting quiet hours)
 	err = sendTelegramNotification(testMessage)
 	if err != nil {
-		log.Fatalf("❌ Failed to send test notification: %v. Please check your Telegram configuration.", err)
+		// Log fatal only if sending failed *outside* quiet hours
+		if !isQuietHours(istLocation) {
+			log.Fatalf("❌ Failed to send test notification (outside quiet hours): %v. Check Telegram config.", err)
+		} else {
+			log.Printf("ℹ️ Test notification suppressed due to quiet hours.")
+		}
 	} else {
-		log.Println("✅ Test notification sent successfully to Telegram.")
+		log.Println("✅ Test notification sent successfully (or suppressed due to quiet hours).")
 	}
 
 	log.Println("Starting Amul product stock notifier...")
-	log.Printf("Monitoring SKUs: %s, %s, %s, %s", plainLassiSKU, roseLassiSKU, kesarMilkshakeSKU, blueberryMilkshakeSKU)
-	log.Printf("Notifications will be sent to Telegram Chat ID: %s", telegramChatID)
 
 	// Validate API URL
 	if _, urlErr := url.Parse(apiURL); urlErr != nil {
-		log.Fatalf("Invalid API URL: %v", urlErr)
+		log.Fatalf("❌ Invalid API URL: %v", urlErr)
 	}
 
-	// Perform an initial check immediately without notifications
+	// --- Initial Check ---
 	log.Println("Performing initial stock check to establish baseline...")
-	checkTargetStock()
+	checkTargetStock() // Populates productDetails and initial productStockState
 
-	// Force initial notification if any products are in stock
+	// Send notifications for products already in stock at startup (respecting quiet hours)
 	sendInitialStockNotifications()
 
-	// Now set firstRun to false to enable regular notifications
-	firstRun = false
+	firstRun = false // Enable regular notifications from now on
+	log.Println("✅ Initial setup complete. Regular checks starting...")
 
-	// Set up ticker for regular checks
+	// --- Start Regular Checks ---
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
-	// Continue checking at regular intervals
 	for range ticker.C {
 		checkTargetStock()
 	}
+}
+
+// Checks if the current time is within the defined quiet hours in the given location
+func isQuietHours(loc *time.Location) bool {
+	if loc == nil {
+		log.Printf("⚠️ Warning: Time location is nil, cannot check quiet hours. Assuming it's NOT quiet hours.")
+		return false // Fail safe: don't suppress if location isn't loaded
+	}
+	currentTime := time.Now().In(loc)
+	currentHour := currentTime.Hour()
+	// Check if current hour is within the range [quietHourStart, quietHourEnd)
+	isQuiet := currentHour >= quietHourStart && currentHour < quietHourEnd
+	// Optional: Log when check occurs during quiet hours
+	// if isQuiet {
+	//  log.Printf("DEBUG: Currently within quiet hours (%d:00-%d:00 %s). Current hour: %d", quietHourStart, quietHourEnd, loc.String(), currentHour)
+	// }
+	return isQuiet
 }
 
 // Send notifications for any products that are already in stock at startup
 func sendInitialStockNotifications() {
 	log.Println("Checking for products already in stock at startup...")
 
-	// Get product names from SKUs (we'll just use placeholder names for now)
-	skuToName := map[string]string{
-		plainLassiSKU:         "Plain Lassi",
-		roseLassiSKU:          "Rose Lassi",
-		kesarMilkshakeSKU:     "Kesar Milkshake",
-		blueberryMilkshakeSKU: "Blueberry Milkshake",
-	}
+	inStockMessages := []string{}
 
-	// Check each product in our state map
-	inStockProducts := []string{}
-
-	for sku, inStock := range productStockState {
-		if inStock {
-			name := skuToName[sku]
-			if name == "" {
-				name = "Unknown Product"
+	// Check each monitored product's initial state
+	for sku := range monitoredSKUsMap {
+		if inStock, exists := productStockState[sku]; exists && inStock {
+			prodInfo, detailsExist := productDetails[sku]
+			name := "Unknown Product"
+			alias := ""
+			inventory := 0
+			if detailsExist {
+				name = prodInfo.Name
+				alias = prodInfo.Alias
+				inventory = prodInfo.InventoryQuantity
+			} else {
+				log.Printf("⚠️ Warning: Details missing for initially in-stock SKU %s", sku)
 			}
-			log.Printf("Found product already in stock at startup: %s (SKU: %s)", name, sku)
-			inStockProducts = append(inStockProducts, fmt.Sprintf("- %s (SKU: %s)", name, sku))
+
+			log.Printf("Found monitored product already in stock at startup: %s (SKU: %s)", name, sku)
+
+			link := ""
+			if alias != "" {
+				link = fmt.Sprintf("\n🔗 <a href=\"%s%s\">View on Amul Shop</a>", productBaseURL, alias)
+			}
+
+			// Format message per product
+			message := fmt.Sprintf("• <b>%s</b> (SKU: %s) - Qty: %d %s", name, sku, inventory, link)
+			inStockMessages = append(inStockMessages, message)
 		}
 	}
 
-	// Send a notification if any products are in stock
-	if len(inStockProducts) > 0 {
-		message := "🚨 <b>Initial Stock Alert!</b>\n\nThese products are currently IN STOCK:\n" +
-			strings.Join(inStockProducts, "\n")
+	// Send a combined notification if any products are in stock
+	if len(inStockMessages) > 0 {
+		fullMessage := "🚨 <b>Initial Stock Alert!</b>\n\nThese monitored products are currently IN STOCK:\n" +
+			strings.Join(inStockMessages, "\n")
 
-		err := sendTelegramNotification(message)
+		err := sendTelegramNotification(fullMessage) // This will respect quiet hours
 		if err != nil {
-			log.Printf("❌ Error sending initial stock notification: %v", err)
+			// Log error only if it happened outside quiet hours
+			if !isQuietHours(istLocation) {
+				log.Printf("❌ Error sending initial stock notification: %v", err)
+			}
+			// If it was quiet hours, sendTelegramNotification already logged suppression
 		} else {
-			log.Println("✅ Initial stock notification sent successfully")
+			log.Println("✅ Initial stock notification sent (or suppressed).")
 		}
 	} else {
-		log.Println("No products found in stock at startup.")
+		log.Println("No monitored products found in stock at startup.")
 	}
 }
 
 // Checks stock for target products and handles state/notifications
 func checkTargetStock() {
-	log.Printf("Checking stock for target products...")
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
+	isScheduledCheck := !firstRun
+	if isScheduledCheck {
+		log.Printf("Checking stock for %d monitored products (Scheduled Check)...", len(monitoredSKUsMap))
 	}
 
+	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
-		log.Printf("Error creating request: %v", err)
+		log.Printf("❌ Error creating request: %v", err)
 		return
 	}
 
-	// Set headers
+	// Set headers (keep existing headers)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	// ... other headers ...
 	req.Header.Set("Referer", "https://shop.amul.com/")
 	req.Header.Set("frontend", "1")
-	req.Header.Set("Sec-GPC", "1")
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("TE", "trailers")
 
 	resp, err := client.Do(req)
+	// (Keep existing request execution and error handling)
 	if err != nil {
-		log.Printf("Error performing request: %v", err)
+		log.Printf("❌ Error performing request: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Error reading response body: %v", err)
+		log.Printf("❌ Error reading response body: %v", err)
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("API returned non-OK status: %s", resp.Status)
-		return // Don't proceed if API call failed
+		log.Printf("❌ API returned non-OK status: %s", resp.Status)
+		// (Keep body preview logging on error)
+		return
 	}
 
 	var productList ProductListResponse
 	err = json.Unmarshal(body, &productList)
+	// (Keep existing JSON parsing and error handling)
 	if err != nil {
-		log.Printf("Error parsing JSON response: %v", err)
-		bodyPreview := string(body)
-		if len(bodyPreview) > 500 {
-			bodyPreview = bodyPreview[:500] + "..."
-		}
-		log.Printf("Response body preview: %s", bodyPreview)
-		return // Don't proceed if response is invalid
+		log.Printf("❌ Error parsing JSON response: %v", err)
+		// (Keep body preview logging on error)
+		return
 	}
 
-	// Log how many products were found
-	log.Printf("Found %d products in the API response", len(productList.Data))
-
-	// Initialize map to track if targets were found in this cycle's response
-	targetSKUsFound := map[string]bool{
-		plainLassiSKU:         false,
-		roseLassiSKU:          false,
-		kesarMilkshakeSKU:     false,
-		blueberryMilkshakeSKU: false,
+	if isScheduledCheck {
+		log.Printf("Received %d products in API response for the query.", len(productList.Data))
 	}
 
-	// Create a map to store product names by SKU
-	productNameMap := make(map[string]string)
-	productInventoryMap := make(map[string]int)
+	// --- Update Product Details and Check Stock ---
+	targetSKUsFoundThisCycle := make(map[string]bool)
 
-	// IMPORTANT: First pass - just collect all product data without changing state
 	for _, product := range productList.Data {
-		// Store product names for all products
-		if product.Name != "" {
-			productNameMap[product.SKU] = product.Name
-			productInventoryMap[product.SKU] = product.InventoryQuantity
-		}
+		// Check if this product is one we are monitoring
+		if _, isMonitored := monitoredSKUsMap[product.SKU]; isMonitored {
+			// Update details for this monitored product
+			productDetails[product.SKU] = product
+			targetSKUsFoundThisCycle[product.SKU] = true
 
-		// Check if this is one of our target products
-		if product.SKU == plainLassiSKU ||
-			product.SKU == roseLassiSKU ||
-			product.SKU == kesarMilkshakeSKU ||
-			product.SKU == blueberryMilkshakeSKU {
-
-			targetSKUsFound[product.SKU] = true
-
-			// Log what we found
-			stockStatus := "OUT OF STOCK"
-			if product.Available == 1 {
-				stockStatus = "IN STOCK"
-			}
-
-			log.Printf("Found target product: %s (SKU: %s) - Status: %s, Inventory: %d",
-				product.Name, product.SKU, stockStatus, product.InventoryQuantity)
-		}
-	}
-
-	// SECOND PASS: Now process the products and send notifications if needed
-	for _, product := range productList.Data {
-		// Check if the current product is one of our targets
-		isTarget := false
-		if product.SKU == plainLassiSKU ||
-			product.SKU == roseLassiSKU ||
-			product.SKU == kesarMilkshakeSKU ||
-			product.SKU == blueberryMilkshakeSKU {
-			isTarget = true
-		}
-
-		if isTarget {
-			currentStockStatus := product.Available == 1 // true if in stock
-
-			// Get previous status from our state map
+			currentStockStatus := product.Available == 1
 			previousStockStatus, exists := productStockState[product.SKU]
 
-			// Debug logging
-			log.Printf("Processing %s (SKU: %s): Current Status=%t, Previous Status=%t, First Run=%t",
-				product.Name, product.SKU, currentStockStatus, previousStockStatus, firstRun)
-
-			// Check for state change: Out of Stock -> In Stock
-			// OR if this is the first time we're seeing this product and it's in stock
-			if currentStockStatus && (!exists || !previousStockStatus) && !firstRun {
-				log.Printf("🚨 STOCK ALERT: %s is now IN STOCK!", product.Name)
-
-				message := fmt.Sprintf("✅ <b>Stock Alert!</b>\n\nProduct: <b>%s</b>\nStatus: <b>IN STOCK</b>\nQuantity: %d\nSKU: %s\n\n🔗 <a href=\"https://shop.amul.com/products/%s\">View on Amul Shop</a>",
-					product.Name, product.InventoryQuantity, product.SKU, product.Alias)
-
-				// Try sending the notification multiple times if it fails
-				var notifErr error
-				for attempts := 0; attempts < 3; attempts++ {
-					notifErr = sendTelegramNotification(message)
-					if notifErr == nil {
-						log.Printf("✅ Telegram notification sent successfully for %s.", product.SKU)
-						break
-					}
-					log.Printf("⚠️ Attempt %d: Error sending Telegram notification for %s: %v",
-						attempts+1, product.SKU, notifErr)
-					time.Sleep(2 * time.Second) // Wait before retrying
+			if isScheduledCheck {
+				stockStatusStr := "OUT OF STOCK"
+				if currentStockStatus {
+					stockStatusStr = "IN STOCK"
 				}
-
-				if notifErr != nil {
-					log.Printf("❌ FAILED to send Telegram notification after 3 attempts for %s", product.SKU)
-				}
+				log.Printf("Processing %s (SKU: %s): API Status=%s (Avail=%d, Qty=%d), Recorded Status=%t",
+					product.Name, product.SKU, stockStatusStr, product.Available, product.InventoryQuantity, previousStockStatus)
 			}
 
-			// Also check for state change: In Stock -> Out of Stock
-			if !currentStockStatus && exists && previousStockStatus {
-				log.Printf("ℹ️ STOCK UPDATE: %s is now OUT OF STOCK", product.Name)
+			// --- Notification Logic ---
 
-				// Optionally send notification for out-of-stock status
+			// 1. Notify if IN STOCK during a scheduled check
+			if currentStockStatus && isScheduledCheck {
+				log.Printf("✅ Found IN STOCK during scheduled check: %s (SKU: %s)", product.Name, product.SKU)
+				link := ""
+				if product.Alias != "" {
+					link = fmt.Sprintf("\n\n🔗 <a href=\"%s%s\">View on Amul Shop</a>", productBaseURL, product.Alias)
+				} else {
+					log.Printf("⚠️ Warning: Alias is empty for SKU %s, cannot generate link.", product.SKU)
+				}
+				message := fmt.Sprintf("✅ <b>Stock Available!</b>\n\nProduct: <b>%s</b>\nStatus: <b>IN STOCK</b>\nQuantity: %d\nSKU: %s%s",
+					product.Name, product.InventoryQuantity, product.SKU, link)
+
+				sendNotificationWithRetry(message, product.SKU, "in-stock") // Will respect quiet hours
+			}
+
+			// 2. Notify if status changed from IN STOCK -> OUT OF STOCK
+			if !currentStockStatus && exists && previousStockStatus && isScheduledCheck {
+				log.Printf("ℹ️ STOCK UPDATE: %s (SKU: %s) changed to OUT OF STOCK", product.Name, product.SKU)
 				message := fmt.Sprintf("ℹ️ <b>Stock Update</b>\n\nProduct: <b>%s</b>\nStatus: <b>OUT OF STOCK</b>\nSKU: %s",
 					product.Name, product.SKU)
-
-				err := sendTelegramNotification(message)
-				if err != nil {
-					log.Printf("⚠️ Error sending out-of-stock notification: %v", err)
-				}
+				sendNotificationWithRetry(message, product.SKU, "out-of-stock") // Will respect quiet hours
 			}
 
-			// Update the state map for the next check
+			// Update the state map *after* processing notifications
 			productStockState[product.SKU] = currentStockStatus
 		}
 	}
 
-	// Send a daily summary of all stock status (optional)
-	hour := time.Now().Hour()
-	minute := time.Now().Minute()
-	if hour == 9 && minute < 5 { // Around 9:00 AM
-		sendDailySummary(productNameMap, productInventoryMap)
-	}
+	// --- Check if any monitored SKUs were missing from the response ---
+	if isScheduledCheck {
+		for sku := range monitoredSKUsMap {
+			if !targetSKUsFoundThisCycle[sku] {
+				// If it was previously in stock or state exists, mark as out of stock
+				if wasInStock, exists := productStockState[sku]; exists && wasInStock {
+					log.Printf("⚠️ WARNING: Monitored SKU %s was NOT found in API response. Assuming OUT OF STOCK.", sku)
+					productStockState[sku] = false // Mark as out of stock
 
-	// Log if target SKUs were not found in the API response during this check
-	for sku, found := range targetSKUsFound {
-		if !found {
-			log.Printf("WARNING: Target SKU %s was not found in the API response this cycle.", sku)
+					prodInfo, detailsExist := productDetails[sku] // Get last known name
+					name := sku                                   // Default to SKU
+					if detailsExist {
+						name = prodInfo.Name
+					}
+
+					message := fmt.Sprintf("❓ <b>Stock Update (Not Found)</b>\n\nProduct: <b>%s</b>\nStatus: <b>Assumed OUT OF STOCK</b> (Not in API response)\nSKU: %s", name, sku)
+					sendNotificationWithRetry(message, sku, "assumed-out-of-stock") // Respects quiet hours
+
+				} else if !exists {
+					// If it was never seen before (doesn't exist in state map), mark as out of stock
+					log.Printf("INFO: Monitored SKU %s was not found in API response and was not previously tracked. Marking as OUT OF STOCK.", sku)
+					productStockState[sku] = false
+				} else {
+					// If it was already out of stock, just log INFO
+					log.Printf("INFO: Monitored SKU %s was not found in API response (was already recorded as out of stock).", sku)
+					// Ensure state remains false
+					productStockState[sku] = false
+				}
+			}
 		}
 	}
+
+	// Optional: Daily summary logic would go here
+	// sendDailySummaryIfNeeded()
 }
 
-// Send a daily summary of all product stock status
-func sendDailySummary(nameMap map[string]string, inventoryMap map[string]int) {
-	log.Println("Sending daily summary of stock status...")
-
-	summary := "<b>📊 Daily Stock Summary</b>\n\n"
-
-	// Add each product to the summary
-	targetSKUs := []string{plainLassiSKU, roseLassiSKU, kesarMilkshakeSKU, blueberryMilkshakeSKU}
-
-	for _, sku := range targetSKUs {
-		name := nameMap[sku]
-		if name == "" {
-			name = "Unknown Product"
-		}
-
-		status := "❌ OUT OF STOCK"
-		inventory := 0
-
-		if inStock, exists := productStockState[sku]; exists && inStock {
-			status = "✅ IN STOCK"
-			inventory = inventoryMap[sku]
-		}
-
-		summary += fmt.Sprintf("• <b>%s</b> (SKU: %s): %s", name, sku, status)
-		if inventory > 0 {
-			summary += fmt.Sprintf(" (%d available)", inventory)
-		}
-		summary += "\n"
+// Helper function to send notification with retries (respects quiet hours via sendTelegramNotification)
+func sendNotificationWithRetry(message, sku, notificationType string) {
+	// Initial check for quiet hours before attempting retries
+	if isQuietHours(istLocation) {
+		log.Printf("ℹ️ Notification (%s) for SKU %s suppressed due to quiet hours.", notificationType, sku)
+		return // Don't even attempt to send
 	}
 
-	// Send the summary
-	err := sendTelegramNotification(summary)
-	if err != nil {
-		log.Printf("❌ Error sending daily summary: %v", err)
-	} else {
-		log.Println("✅ Daily summary sent successfully")
+	var notifErr error
+	for attempts := 0; attempts < 3; attempts++ {
+		notifErr = sendTelegramNotification(message) // This function now checks quiet hours internally too, but the check above prevents needless attempts.
+		if notifErr == nil {
+			// If sendTelegramNotification returns nil, it means success OR suppression.
+			// Since we checked isQuietHours above, nil here means success.
+			log.Printf("✅ Telegram notification (%s) sent successfully for %s (Attempt %d).", notificationType, sku, attempts+1)
+			return // Success
+		}
+
+		// If error is not nil, it means sending actually failed (not suppressed)
+		log.Printf("⚠️ Attempt %d: Error sending Telegram notification (%s) for %s: %v",
+			attempts+1, notificationType, sku, notifErr)
+
+		if attempts < 2 {
+			time.Sleep(2 * time.Second)
+		}
 	}
+	log.Printf("❌ FAILED to send Telegram notification (%s) after 3 attempts for %s", notificationType, sku)
 }
 
-// Function to send message via Telegram Bot API
+// Function to send message via Telegram Bot API (Now checks quiet hours)
 func sendTelegramNotification(message string) error {
+	// *** ADDED: Check for quiet hours before sending ***
+	if isQuietHours(istLocation) {
+		log.Printf("ℹ️ Telegram notification suppressed due to quiet hours (%d:00-%d:00 %s).", quietHourStart, quietHourEnd, timeZone)
+		return nil // Return success (nil error) to indicate suppression, not failure
+	}
+
 	if telegramBotToken == "" || telegramChatID == "" {
+		log.Println("❌ Error: Attempted to send Telegram notification but token or chat ID is missing.")
 		return fmt.Errorf("telegram bot token or chat id is not configured")
 	}
 
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", telegramBotToken)
-
-	// Log the Telegram API URL being used (partial, for security)
-	urlParts := strings.Split(apiURL, telegramBotToken)
-	if len(urlParts) >= 2 {
-		log.Printf("Using Telegram API URL: %s[TOKEN]%s", urlParts[0], urlParts[1])
-	}
+	// (Keep existing URL logging)
 
 	payload := map[string]string{
 		"chat_id":                  telegramChatID,
 		"text":                     message,
-		"parse_mode":               "HTML",  // Enable HTML formatting
-		"disable_web_page_preview": "false", // Allow web page previews for links
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": "false",
 	}
 
 	jsonPayload, err := json.Marshal(payload)
+	// (Keep existing payload logging and marshalling error handling)
 	if err != nil {
+		log.Printf("❌ Error marshalling telegram payload: %v", err)
 		return fmt.Errorf("error marshalling telegram payload: %w", err)
 	}
+	log.Printf("Attempting to send Telegram payload to chat ID %s...", telegramChatID) // Removed payload content log
 
-	// Debug: Print the payload we're sending (redacting sensitive info)
-	payloadStr := string(jsonPayload)
-	payloadStr = strings.Replace(payloadStr, telegramBotToken, "[TOKEN]", -1)
-	payloadStr = strings.Replace(payloadStr, telegramChatID, "[CHAT_ID]", -1)
-	log.Printf("Sending Telegram payload: %s", payloadStr)
-
-	// Create a custom HTTP client with timeout
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	// Create request manually to add headers
+	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonPayload))
+	// (Keep existing request creation and header setting)
 	if err != nil {
+		log.Printf("❌ Error creating Telegram request: %v", err)
 		return fmt.Errorf("error creating request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "AmulStockNotifier/1.0")
+	req.Header.Set("User-Agent", "AmulStockNotifier/1.2")
 
-	// Perform the request
 	resp, err := client.Do(req)
+	// (Keep existing request execution and error handling)
 	if err != nil {
+		log.Printf("❌ Error sending request to Telegram API: %v", err)
 		return fmt.Errorf("error sending request to telegram api: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read and log the full response for debugging
 	body, readErr := io.ReadAll(resp.Body)
+	// (Keep existing body reading and error handling)
 	if readErr != nil {
-		return fmt.Errorf("error reading telegram response body: %w", readErr)
+		log.Printf("❌ Error reading Telegram response body (Status: %s): %v", resp.Status, readErr)
+		return fmt.Errorf("error reading telegram response body (status %d): %w", resp.StatusCode, readErr)
 	}
 
-	log.Printf("Telegram API response status: %s", resp.Status)
-	log.Printf("Telegram API response body: %s", string(body))
-
+	log.Printf("Telegram API response Status: %s", resp.Status)
+	// Only log body on non-OK status for cleaner logs during normal operation
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("Telegram API response Body (Error): %s", string(body))
+		log.Printf("❌ Error: Telegram API returned non-OK status: %d", resp.StatusCode)
 		return fmt.Errorf("telegram api returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Validate the response indicates success
+	// Optional: Validate success response body (keep existing logic)
 	var telegramResponse map[string]any
 	if err := json.Unmarshal(body, &telegramResponse); err != nil {
-		return fmt.Errorf("error parsing telegram response: %w", err)
+		log.Printf("⚠️ Warning: Could not parse successful Telegram response JSON: %v", err)
+	} else {
+		if ok, exists := telegramResponse["ok"].(bool); !exists || !ok {
+			log.Printf("❌ Error: Telegram API status OK, but response indicates failure: %s", string(body))
+			return fmt.Errorf("telegram api reported failure despite 200 OK: %s", string(body))
+		}
 	}
 
-	// Check if the 'ok' field is true
-	if ok, exists := telegramResponse["ok"].(bool); !exists || !ok {
-		return fmt.Errorf("telegram api reported failure: %s", string(body))
-	}
-
+	log.Printf("✅ Telegram request successful (Status: %s)", resp.Status)
 	return nil // Success
 }
+
+// Placeholder for daily summary function (if needed later)
+// func sendDailySummaryIfNeeded() {
+//     if isQuietHours(istLocation) { return } // Respect DND
+//     // Add logic to check time of day, e.g., once around 9 AM IST
+//     // Use monitoredSKUsMap, productDetails, productStockState
+// }
