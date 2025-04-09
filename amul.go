@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -36,8 +37,6 @@ const (
 	// Consider making the category filter configurable too if you monitor other types later
 	apiURL = "https://shop.amul.com/api/1/entity/ms.products?fields[name]=1&fields[brand]=1&fields[categories]=1&fields[collections]=1&fields[alias]=1&fields[sku]=1&fields[price]=1&fields[compare_price]=1&fields[original_price]=1&fields[images]=1&fields[metafields]=1&fields[discounts]=1&fields[catalog_only]=1&fields[is_catalog]=1&fields[seller]=1&fields[available]=1&fields[inventory_quantity]=1&fields[net_quantity]=1&fields[num_reviews]=1&fields[avg_rating]=1&fields[inventory_low_stock_quantity]=1&fields[inventory_allow_out_of_stock]=1&filters[0][field]=categories&filters[0][value][0]=protein&filters[0][operator]=in&facets=true&facetgroup=default_category_facet&limit=100&total=1&start=0" // Increased limit a bit
 
-	checkInterval = 60 * time.Minute // Check frequency
-
 	// *** CHANGED BASE URL ***
 	productBaseURL = "https://shop.amul.com/en/product/"
 
@@ -55,6 +54,7 @@ var (
 	istLocation       *time.Location                 // For IST timezone handling
 	monitoredSKUsMap  map[string]bool                // Set of SKUs to monitor (loaded from env)
 )
+var checkInterval, _ = time.ParseDuration("60m")
 
 // --- Telegram Configuration ---
 var (
@@ -64,6 +64,10 @@ var (
 
 func main() {
 	var err error // Declare err here for timezone loading
+
+	checkIntervalPtr := flag.Duration("check-interval", checkInterval, "interval at which the app will check for stock")
+	flag.Parse()
+	checkInterval = *checkIntervalPtr;
 
 	// --- Load Timezone ---
 	istLocation, err = time.LoadLocation(timeZone)
