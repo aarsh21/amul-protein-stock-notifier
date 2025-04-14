@@ -102,7 +102,7 @@ This Go application monitors the stock availability of specific, user-configured
     Open your terminal in the project directory and run:
 
     ```bash
-    go build -o amul-stock-notifier .
+    make build
     ```
 
     *(This creates an executable file named `amul-stock-notifier` in the current directory, or `amul-stock-notifier.exe` on Windows)*

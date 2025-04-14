@@ -6,8 +6,8 @@ ARGS ?=
 all: build test
 
 build:
-	@echo "Building..."
-	@go build -o main cmd/api/main.go
+	@echo "Building binary amul-stock-notifier..."
+	@go build -o amul-stock-notifier cmd/api/main.go
 
 # Run the application
 run:
