@@ -24,7 +24,7 @@ func main() {
 	bot.SendInitialStockNotifications(amulBot)
 	
 	bot.SetBotFirstRun(amulBot)
-	log.Println("Initial setup complete. Regular checks starting...")
+	log.Printf("Initial setup complete. Regular checks starting with check-interval[%v]", appConfig.CheckInterval)
 	ticker := time.NewTicker(appConfig.CheckInterval)
 	defer ticker.Stop()
 
