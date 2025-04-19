@@ -20,6 +20,7 @@ func main() {
 		log.Fatalf("Failed to initialize bot with error[%s]", err.Error())
 	}
 
+	bot.StartupTestNotification(appConfig)
 	bot.CheckTargetStock(amulBot)
 	bot.SendInitialStockNotifications(amulBot)
 	

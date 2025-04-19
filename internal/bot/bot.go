@@ -182,7 +182,7 @@ func CheckTargetStock(bot *Bot) {
 	for sku := range bot.appConfig.MonitoredSKUsMap {
 		if !targetSKUsFoundThisCycle[sku] {
 			if wasInStock, exists := bot.productStockState[sku]; exists && wasInStock {
-				log.Printf("⚠️ WARNING: Monitored SKU %s was NOT found in API response. Assuming OUT OF STOCK.", sku)
+				log.Printf("WARNING: Monitored SKU %s was NOT found in API response. Assuming OUT OF STOCK.", sku)
 				bot.productStockState[sku] = false
 
 				prodInfo, detailsExist := bot.productDetails[sku]
