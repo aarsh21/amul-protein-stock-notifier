@@ -37,20 +37,21 @@ func parseSKUsToBeMonitored(monitoredSKUsRaw string) map[string]bool {
 	return monitoredSKUsMap
 }
 
-func loadEnvVariables() (string, string, error) {
+func loadEnvVariables() (string, string, string, error) {
 	log.Println("Attempting to load .env file...")
 	cwd, _ := os.Getwd()
 	log.Printf("Current working directory: %s", cwd)
 	if err := godotenv.Load(); err != nil {
-		return "", "", err
+		return "", "", "", err
 	} else {
 		log.Println(".env file loaded successfully (if found).")
 	}
 
 	telegramBotToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	telegramChatID := strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
+	monitoredSKUs := strings.TrimSpace(os.Getenv("MONITORED_SKUS"))
 
-	return telegramBotToken, telegramChatID, nil
+	return telegramBotToken, telegramChatID, monitoredSKUs, nil
 }
 
 func ParseConfiguration() (*AppConfig, error) {
@@ -58,6 +59,7 @@ func ParseConfiguration() (*AppConfig, error) {
 	checkIntervalPtr := flag.Duration("check-interval", defaultCheckInterval, "interval at which the app will check for stock")
 	monitoredRawSKUs := flag.String("monitored-skus", "", "comma seprated values of SKUs to be monitored")
 	timezonePtr := flag.String("timezone", "", "timezone")
+	var telegramBotToken, telegramChatID string
 	flag.Parse()
 
 	timeLocation, err := time.LoadLocation(*timezonePtr)
@@ -65,13 +67,13 @@ func ParseConfiguration() (*AppConfig, error) {
 		log.Println("Failed to parse timezone argument, disabling quiet hours")
 	}
 
-	if *monitoredRawSKUs == "" {
-		return nil, errors.New("monitored-skus argument is not set or empty. Please provide a comma-separated list of SKUs")
-	}
-
-	telegramBotToken, telegramChatID, err := loadEnvVariables()
+	telegramBotToken, telegramChatID, *monitoredRawSKUs, err = loadEnvVariables()
 	if err != nil {
 		return nil, err
+	}
+
+	if *monitoredRawSKUs == "" {
+		return nil, errors.New("monitored-skus argument is not set or empty. Please provide a comma-separated list of SKUs")
 	}
 	if telegramBotToken == "" || telegramChatID == "" {
 		return nil, errors.New("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty. Please set them in your environment or .env file")

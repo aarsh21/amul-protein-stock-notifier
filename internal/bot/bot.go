@@ -88,7 +88,6 @@ func InitBot(appConfig *config.AppConfig) (*Bot, error) {
 	}, nil
 }
 
-
 func checkCookie(cookieExpiry time.Time, botHttpClient *http.Client) {
 	if time.Now().Add(cookieRefreshMargin).After(cookieExpiry) {
 		refreshCookie(botHttpClient)
