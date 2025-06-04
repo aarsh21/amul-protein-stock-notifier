@@ -6,22 +6,22 @@ ARGS ?=
 all: build test
 
 build:
-	@echo "Building binary amul-stock-notifier..."
-	@go build -o amul-stock-notifier cmd/api/main.go
+	@echo "Building Amul Stock Notifier Bot..."
+	@go build -o amul-bot cmd/main.go
 
 # Run the application
 run:
-	@go run cmd/api/main.go $(ARGS)
+	@go run cmd/main.go $(ARGS)
 
 # Test the application
 test:
 	@echo "Testing..."
 	@go test ./... -v
 
-# Clean the binary
+# Clean the binaries
 clean:
 	@echo "Cleaning..."
-	@rm -f main
+	@rm -f amul-bot
 
 # Live Reload
 watch:

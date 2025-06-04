@@ -72,24 +72,39 @@ func ParseConfiguration() (*AppConfig, error) {
 		return nil, err
 	}
 
-	if *monitoredRawSKUs == "" {
-		return nil, errors.New("monitored-skus argument is not set or empty. Please provide a comma-separated list of SKUs")
+	// Only require telegram bot token for interactive mode
+	if telegramBotToken == "" {
+		return nil, errors.New("TELEGRAM_BOT_TOKEN is empty. Please set it in your environment or .env file")
 	}
-	if telegramBotToken == "" || telegramChatID == "" {
-		return nil, errors.New("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty. Please set them in your environment or .env file")
-	}
+
+	// TELEGRAM_CHAT_ID and monitored-skus are now optional for interactive bot mode
+	// They will be provided by individual user subscriptions instead
 
 	log.Printf("Telegram Bot Token Length: %d", len(telegramBotToken))
 	if len(telegramBotToken) > 10 {
 		log.Printf("Telegram Bot Token Hint: Starts with '%s', ends with '%s'", telegramBotToken[:5], telegramBotToken[len(telegramBotToken)-5:])
 	}
-	log.Printf("Telegram Chat ID: %s", telegramChatID)
+
+	if telegramChatID != "" {
+		log.Printf("Telegram Chat ID (fallback): %s", telegramChatID)
+	} else {
+		log.Println("No fallback Telegram Chat ID set - using interactive mode only")
+	}
+
+	var monitoredSKUsMap map[string]bool
+	if *monitoredRawSKUs != "" {
+		monitoredSKUsMap = parseSKUsToBeMonitored(*monitoredRawSKUs)
+		log.Println("Legacy mode: Using predefined SKU list")
+	} else {
+		monitoredSKUsMap = make(map[string]bool)
+		log.Println("Interactive mode: SKUs will be managed through user subscriptions")
+	}
 
 	return &AppConfig{
 		CheckInterval:    *checkIntervalPtr,
 		Timezone:         timeLocation,
 		TelegramBotToken: telegramBotToken,
 		TelegramChatId:   telegramChatID,
-		MonitoredSKUsMap: parseSKUsToBeMonitored(*monitoredRawSKUs),
+		MonitoredSKUsMap: monitoredSKUsMap,
 	}, nil
 }

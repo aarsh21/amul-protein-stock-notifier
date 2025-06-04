@@ -4,12 +4,12 @@ import (
 	"amul-notifier/internal/config"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +26,17 @@ const (
 	// TODO: parse the expiry time and generate one more cookie again
 	cookieRefreshMargin = 90 * time.Hour // Refresh cookie before it expires
 )
+
+// isQuietHours checks if the current time is within quiet hours
+func isQuietHours(loc *time.Location) bool {
+	if loc == nil {
+		log.Printf("Warning: Time location is nil, cannot check quiet hours. Assuming it's NOT quiet hours.")
+		return false
+	}
+	currentTime := time.Now().In(loc)
+	currentHour := currentTime.Hour()
+	return currentHour >= quietHourStart && currentHour < quietHourEnd
+}
 
 // Struct to match the overall JSON response structure
 type ProductListResponse struct {
@@ -59,6 +70,14 @@ type Bot struct {
 	httpClient *http.Client
 
 	appConfig *config.AppConfig
+
+	// Interactive bot for user management
+	interactiveBot *InteractiveBot
+
+	// Rate limiting
+	lastAPICall    time.Time
+	apiCallMutex   sync.Mutex
+	rateLimitDelay time.Duration
 }
 
 func SetBotFirstRun(bot *Bot) {
@@ -85,19 +104,143 @@ func InitBot(appConfig *config.AppConfig) (*Bot, error) {
 		httpClient:        httpClient,
 		cookieExpiry:      cookieExpiry,
 		appConfig:         appConfig,
+		rateLimitDelay:    5 * time.Second, // 5 second delay between API calls
 	}, nil
 }
 
-func checkCookie(cookieExpiry time.Time, botHttpClient *http.Client) {
-	if time.Now().Add(cookieRefreshMargin).After(cookieExpiry) {
-		refreshCookie(botHttpClient)
+func (bot *Bot) SetInteractiveBot(interactiveBot *InteractiveBot) {
+	bot.interactiveBot = interactiveBot
+}
+
+// GetUserStorePreference returns the store preference for API calls
+// It tries to get a user's store preference, fallback to "gujarat"
+func (bot *Bot) GetUserStorePreference() string {
+	if bot.interactiveBot != nil {
+		// Get the first user's store preference as a representative
+		// In a real scenario, you might want to use the most common preference
+		// or make API calls per user, but for simplicity we'll use the first one
+		users := bot.interactiveBot.GetUserSubscriptions()
+		for _, user := range users {
+			if user.StoreCode != "" {
+				log.Printf("Using store preference: %s", user.StoreCode)
+				return user.StoreCode
+			}
+		}
+	}
+
+	log.Printf("Using default store preference: gujarat")
+	return "gujarat" // default fallback
+}
+
+// checkSpecificSKUs checks stock for specific SKUs and returns results
+func (bot *Bot) checkSpecificSKUs(targetSKUs map[string]bool) map[string]ProductInfo {
+	results := make(map[string]ProductInfo)
+
+	if len(targetSKUs) == 0 {
+		return results
+	}
+
+	log.Printf("Performing manual stock check for %d SKUs...", len(targetSKUs))
+
+	// Enforce rate limiting
+	bot.enforceRateLimit()
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		log.Printf("Error creating request for manual check: %v", err)
+		return results
+	}
+
+	// Set headers
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0")
+	req.Header.Set("Referer", "https://shop.amul.com/")
+	req.Header.Set("frontend", "1")
+	req.Header.Set("Connection", "keep-alive")
+
+	resp, err := bot.httpClient.Do(req)
+	if err != nil {
+		log.Printf("Error performing manual check request: %v", err)
+		return results
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading manual check response body: %v", err)
+		return results
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Manual check API returned non-OK status: %s", resp.Status)
+		return results
+	}
+
+	var productList ProductListResponse
+	err = json.Unmarshal(body, &productList)
+	if err != nil {
+		log.Printf("Error parsing manual check JSON response: %v", err)
+		return results
+	}
+
+	log.Printf("Manual check: Received %d products in API response", len(productList.Data))
+
+	// Filter for target SKUs
+	for _, product := range productList.Data {
+		if targetSKUs[product.SKU] {
+			results[product.SKU] = product
+			log.Printf("Manual check: Found %s (SKU: %s) - Available: %d", product.Name, product.SKU, product.Available)
+		}
+	}
+
+	log.Printf("Manual check completed: Found %d/%d target products", len(results), len(targetSKUs))
+	return results
+}
+
+// enforceRateLimit ensures we don't make API calls too frequently
+func (bot *Bot) enforceRateLimit() {
+	bot.apiCallMutex.Lock()
+	defer bot.apiCallMutex.Unlock()
+
+	timeSinceLastCall := time.Since(bot.lastAPICall)
+	if timeSinceLastCall < bot.rateLimitDelay {
+		sleepDuration := bot.rateLimitDelay - timeSinceLastCall
+		log.Printf("⏱️ Rate limiting: Waiting %v before next API call", sleepDuration)
+		time.Sleep(sleepDuration)
+	}
+
+	bot.lastAPICall = time.Now()
+}
+
+func (bot *Bot) checkCookie() {
+	if time.Now().Add(cookieRefreshMargin).After(bot.cookieExpiry) {
+		newExpiry, err := bot.refreshCookie()
+		if err != nil {
+			log.Printf("Error refreshing cookie: %v", err)
+		} else {
+			bot.cookieExpiry = newExpiry
+		}
 	}
 }
 
 func CheckTargetStock(bot *Bot) {
-	checkCookie(bot.cookieExpiry, bot.httpClient)
+	bot.checkCookie()
 
-	log.Printf("Checking stock for %d monitored products...", len(bot.appConfig.MonitoredSKUsMap))
+	// Enforce rate limiting
+	bot.enforceRateLimit()
+
+	// Get all subscribed SKUs from interactive bot if available
+	var monitoredSKUs map[string]bool
+	if bot.interactiveBot != nil {
+		monitoredSKUs = bot.interactiveBot.GetAllSubscribedSKUs()
+		if len(monitoredSKUs) == 0 {
+			log.Println("ℹ️ No users subscribed to any products yet")
+			return
+		}
+	} else {
+		monitoredSKUs = bot.appConfig.MonitoredSKUsMap
+	}
+
+	log.Printf("Checking stock for %d monitored products...", len(monitoredSKUs))
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -141,7 +284,7 @@ func CheckTargetStock(bot *Bot) {
 	targetSKUsFoundThisCycle := make(map[string]bool)
 
 	for _, product := range productList.Data {
-		if _, isMonitored := bot.appConfig.MonitoredSKUsMap[product.SKU]; isMonitored {
+		if _, isMonitored := monitoredSKUs[product.SKU]; isMonitored {
 			bot.productDetails[product.SKU] = product
 			targetSKUsFoundThisCycle[product.SKU] = true
 
@@ -156,29 +299,27 @@ func CheckTargetStock(bot *Bot) {
 
 			if currentStockStatus {
 				log.Printf("Found IN STOCK: %s (SKU: %s)", product.Name, product.SKU)
-				link := ""
-				if product.Alias != "" {
-					link = fmt.Sprintf("\n\n🔗 <a href=\"%s%s\">View on Amul Shop</a>", productBaseURL, product.Alias)
+
+				// Send notification through interactive bot
+				if bot.interactiveBot != nil {
+					bot.interactiveBot.SendStockNotificationToSubscribers(product.SKU, product, true)
 				}
-
-				message := fmt.Sprintf("✅ <b>Stock Available!</b>\n\nProduct: <b>%s</b>\nStatus: <b>IN STOCK</b>\nQuantity: %d\nSKU: %s%s",
-					product.Name, product.InventoryQuantity, product.SKU, link)
-
-				sendNotificationWithRetry(bot.appConfig, message, product.SKU, "in-stock")
 			}
 
 			if !currentStockStatus && exists && previousStockStatus {
 				log.Printf("ℹ️ STOCK UPDATE: %s (SKU: %s) changed to OUT OF STOCK", product.Name, product.SKU)
-				message := fmt.Sprintf("ℹ️ <b>Stock Update</b>\n\nProduct: <b>%s</b>\nStatus: <b>OUT OF STOCK</b>\nSKU: %s",
-					product.Name, product.SKU)
-				sendNotificationWithRetry(bot.appConfig, message, product.SKU, "out-of-stock")
+
+				// Send notification through interactive bot
+				if bot.interactiveBot != nil {
+					bot.interactiveBot.SendStockNotificationToSubscribers(product.SKU, product, false)
+				}
 			}
 
 			bot.productStockState[product.SKU] = currentStockStatus
 		}
 	}
 
-	for sku := range bot.appConfig.MonitoredSKUsMap {
+	for sku := range monitoredSKUs {
 		if !targetSKUsFoundThisCycle[sku] {
 			if wasInStock, exists := bot.productStockState[sku]; exists && wasInStock {
 				log.Printf("WARNING: Monitored SKU %s was NOT found in API response. Assuming OUT OF STOCK.", sku)
@@ -190,8 +331,15 @@ func CheckTargetStock(bot *Bot) {
 					name = prodInfo.Name
 				}
 
-				message := fmt.Sprintf("<b>Stock Update (Not Found)</b>\n\nProduct: <b>%s</b>\nStatus: <b>Assumed OUT OF STOCK</b> (Not in API response)\nSKU: %s", name, sku)
-				sendNotificationWithRetry(bot.appConfig, message, sku, "assumed-out-of-stock")
+				// Send notification through interactive bot
+				if bot.interactiveBot != nil {
+					// Create a dummy product info for the notification
+					dummyProductInfo := ProductInfo{
+						SKU:  sku,
+						Name: name,
+					}
+					bot.interactiveBot.SendStockNotificationToSubscribers(sku, dummyProductInfo, false)
+				}
 			} else if !exists {
 				log.Printf("INFO: Monitored SKU %s was not found in API response and was not previously tracked. Marking as OUT OF STOCK.", sku)
 				bot.productStockState[sku] = false
@@ -203,7 +351,15 @@ func CheckTargetStock(bot *Bot) {
 	}
 }
 
+func (bot *Bot) refreshCookie() (time.Time, error) {
+	return refreshCookieWithStore(bot.httpClient, bot.GetUserStorePreference())
+}
+
 func refreshCookie(httpClient *http.Client) (time.Time, error) {
+	return refreshCookieWithStore(httpClient, "gujarat")
+}
+
+func refreshCookieWithStore(httpClient *http.Client, storeCode string) (time.Time, error) {
 	log.Println("Refreshing Amul API cookie...")
 
 	var cookieExpiry time.Time
@@ -250,7 +406,7 @@ func refreshCookie(httpClient *http.Client) (time.Time, error) {
 	putURL := "https://shop.amul.com/entity/ms.settings/_/setPreferences"
 	payload := map[string]map[string]string{
 		"data": {
-			"store": "gujarat",
+			"store": storeCode,
 		},
 	}
 	jsonPayload, _ := json.Marshal(payload)

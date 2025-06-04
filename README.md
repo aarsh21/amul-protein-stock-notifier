@@ -1,143 +1,288 @@
-# Amul Shop Stock Notifier
+# 🤖 Amul Stock Notifier Bot
 
-## Overview
+## 🌟 Overview
 
-This Go application monitors the stock availability of specific, user-configured products on the official Amul Shop website (`shop.amul.com`). When a monitored product's stock status changes or meets certain conditions, it sends a notification to a specified Telegram chat, respecting configurable quiet hours.
+This is a beautiful, interactive Telegram bot that monitors Amul protein product stock and sends personalized notifications! Users can easily browse products, subscribe to notifications, and manage their preferences through an intuitive UI with buttons and menus.
 
-## Features
+## ✨ Key Features
 
-- **Periodic Stock Checking:** Checks product availability at a configurable interval (via `--check-interval` flag, default: 60 minutes).
-- **Configurable Product List:** Define which product SKUs to monitor via the `--monitored-skus` command-line flag (comma-separated).
-- **Telegram Notifications:**
-  - Sends an alert **every check cycle** if a monitored product is found **in-stock** (outside of quiet hours).
-  - Sends an update when a monitored product changes from in-stock to **out-of-stock** (or is assumed out-of-stock if it disappears from the API).
-  - Sends an initial notification listing any monitored products that are already **in-stock** when the application starts (respecting quiet hours).
-  - Sends a test notification on startup to confirm Telegram configuration and quiet hours are working.
-- **Quiet Hours (Do Not Disturb):** Notifications are automatically suppressed during a defined time window (default: 00:00 AM to 07:00 AM) based on the timezone provided via the `--timezone` flag (e.g., "Asia/Kolkata"). If no timezone is provided, quiet hours are disabled.
-- **Configuration:**
-  - Primarily configured via command-line flags: `--check-interval`, `--monitored-skus`, `--timezone`.
-  - Uses a `.env` file or environment variables for Telegram credentials (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
-- **Automatic Cookie Management:** Handles Amul shop session cookies and refreshes them automatically before expiry.
-- **Basic Retry:** Attempts to send Telegram notifications up to 3 times if the initial attempt fails (outside of quiet hours).
-- **Logging:** Provides console logs detailing checks, stock status found, notification attempts, quiet hour suppressions, and cookie refresh activity.
+### 🎨 Amazing Telegram UI
+- **📱 Interactive Inline Keyboards**: Beautiful button-based navigation
+- **🎯 Category-based Browsing**: Organized product categories with emojis
+- **📊 Real-time Status Display**: Live stock status indicators
+- **⚡ Instant Feedback**: Immediate responses to user actions
 
-## Prerequisites
+### 🔔 Smart Notification System
+- **👥 Multi-user Support**: Each user manages their own subscriptions
+- **🎯 Personalized Alerts**: Only get notified for products you care about
+- **📍 Location-based Experience**: Set your region for personalized product availability
+- **🔇 Quiet Hours Respect**: Respects configured quiet hours
+- **📬 Rich Notifications**: Detailed stock alerts with product links
 
-- **Go:** Version 1.18 or later installed. ([Download Go](https://golang.org/dl/))
-- **Telegram Account:** To receive notifications.
-- **Telegram Bot:** You need to create a Telegram bot and obtain its **Bot Token**.
-  - Talk to the `@BotFather` on Telegram.
-  - Use the `/newbot` command and follow the instructions.
-  - Copy the **HTTP API token** it gives you.
-- **Telegram Chat ID:** You need the ID of the chat (user, group, or channel) where the bot should send notifications.
-  - One way to get your user ID is to talk to `@userinfobot` on Telegram.
-  - For group chats, add the bot to the group, send a message mentioning the bot, and check the Telegram API response or use helper bots like `@get_id_bot`.
-- **Product SKUs:** You need to know the Stock Keeping Units (SKUs) for the Amul products you want to monitor. You might find these by:
+### 🛍️ Product Management
+- **📋 17 Available Products**: All Amul protein products categorized
+- **🧀 Categories**: Milkshakes, Paneer, Whey Protein, Buttermilk, Lassi, Milk
+- **✅ Easy Subscription**: One-click subscribe/unsubscribe
+- **📈 Stock Tracking**: Real-time inventory monitoring
 
-  - Looking at the product URL or page source code on `shop.amul.com`.
-  - Using browser developer tools to inspect network requests when viewing product pages (look for API calls returning product data).
+### 💾 Data Persistence
+- **🗄️ JSON-based Storage**: User subscriptions saved locally
+- **🔄 Auto-save**: Subscriptions automatically saved on changes
+- **📱 Cross-session Memory**: Bot remembers user preferences
 
-    Here's a table of some Amul High Protein product SKUs and their corresponding product names (this list might not be exhaustive and availability may vary):
+## 🚀 Getting Started
 
-    | SKU        | Product Name                                                        |
-    | ---------- | ------------------------------------------------------------------- |
-    | DBDCP44_30 | Amul Kool Protein Milkshake \| Chocolate, 180 mL \| Pack of 30      |
-    | DBDCP43_30 | Amul Kool Protein Milkshake \| Arabica Coffee, 180 mL \| Pack of 30 |
-    | DBDCP42_30 | Amul Kool Protein Milkshake \| Kesar, 180 mL \| Pack of 30          |
-    | DBDCP41_30 | Amul High Protein Blueberry Shake, 200 mL \| Pack of 30             |
-    | HPPCP01_02 | Amul High Protein Paneer, 400 g \| Pack of 2                        |
-    | HPPCP01_24 | Amul High Protein Paneer, 400 g \| Pack of 24                       |
-    | WPCCP04_01 | Amul Whey Protein Gift Pack, 32 g \| Pack of 10 sachets             |
-    | WPCCP01_01 | Amul Whey Protein, 32 g \| Pack of 30 Sachets                       |
-    | WPCCP02_01 | Amul Whey Protein, 32 g \| Pack of 60 Sachets                       |
-    | WPCCP06_01 | Amul Chocolate Whey Protein Gift Pack, 34 g \| Pack of 10 sachets   |
-    | WPCCP03_01 | Amul Chocolate Whey Protein, 34 g \| Pack of 30 sachets             |
-    | WPCCP05_02 | Amul Chocolate Whey Protein, 34 g \| Pack of 60 sachets             |
-    | BTMCP11_30 | Amul High Protein Buttermilk, 200 mL \| Pack of 30                  |
-    | LASCP61_30 | Amul High Protein Plain Lassi, 200 mL \| Pack of 30                 |
-    | LASCP40_30 | Amul High Protein Rose Lassi, 200 mL \| Pack of 30                  |
-    | HPMCP01_08 | Amul High Protein Milk, 250 mL \| Pack of 8                         |
-    | HPMCP01_32 | Amul High Protein Milk, 250 mL \| Pack of 32                        |
+### Prerequisites
 
-    **Note:** This table provides some examples. You need to find the specific SKUs for the products you wish to monitor on the Amul Shop website.
+1. **Telegram Bot Token**: Create a bot with [@BotFather](https://t.me/BotFather)
+2. **Go 1.18+**: [Download Go](https://golang.org/dl/)
+3. **Environment Setup**: Configure your `.env` file
 
-## Setup
+### 🔧 Installation
 
-1. **Clone the Repository (If applicable):**
-
+1. **Clone and Setup**:
    ```bash
-   git clone <repository_url>
-   cd <repository_directory_name>
+   git clone <your-repo>
+   cd amul-protein-stock-notifier
    ```
 
-   _(Replace `<repository_url>` and `<repository_directory_name>`)_
-   If you just have the project files, navigate to that directory in your terminal.
+2. **Install Dependencies**:
+   ```bash
+   go mod download
+   ```
 
-2. **Configure Credentials (and Optional Overrides):**
-   Create a file named `.env` in the project's root directory (where `main.go` or the executable is). Add your Telegram Bot Token and Chat ID.
-   Product SKUs and check intervals are now primarily set via command-line flags.
-
-   ```dotenv
-   # .env file
-
+3. **Configure Environment**:
+   Create a `.env` file:
+   ```env
    # Required: Your Telegram Bot Token from BotFather
-   TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN_HERE
-
-   # Required: The ID of the chat where notifications should be sent
-   TELEGRAM_CHAT_ID=YOUR_TELEGRAM_CHAT_ID_HERE
-
-   # Optional: You can still set MONITORED_SKUS here as a fallback if not provided by --monitored-skus flag
-   # MONITORED_SKUS=LASCP61_30,LASCP40_30
-
-   # Optional: You can still set CHECK_INTERVAL here as a fallback if not provided by --check-interval flag
-   # CHECK_INTERVAL=30m
+   TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+   
+   # Optional: Fallback chat ID for system notifications (legacy mode only)
+   # Leave empty for pure interactive mode
+   # TELEGRAM_CHAT_ID=YOUR_CHAT_ID
    ```
 
-   - Replace `YOUR_TELEGRAM_BOT_TOKEN_HERE` with the token you got from BotFather.
-   - Replace `YOUR_TELEGRAM_CHAT_ID_HERE` with the target chat's ID.
-   - The `MONITORED_SKUS` environment variable can be used as a fallback if the `--monitored-skus` command-line flag is not provided.
-   - The `CHECK_INTERVAL` environment variable can be used as a fallback if the `--check-interval` command-line flag is not provided.
-
-   Alternatively, you can set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as environment variables directly in your system.
-
-3. **Install Dependencies (Usually Automatic):**
-   Go typically handles dependencies automatically during the build. If you encounter issues, run:
-
-   ```bash
-   go mod tidy
-   ```
-
-4. **Build the Application:**
-   Open your terminal in the project directory and run:
-
+4. **Build the Bot**:
    ```bash
    make build
    ```
 
-   _(This creates an executable file named `amul-stock-notifier` in the current directory, or `amul-stock-notifier.exe` on Windows)_
+5. **Run the Bot**:
+   ```bash
+   ./amul-bot --timezone="Asia/Kolkata" --check-interval="30m"
+   ```
 
-## Running
+   Or use the Makefile:
+   ```bash
+   make run ARGS="--timezone=Asia/Kolkata --check-interval=30m"
+   ```
 
-Ensure the `.env` file (for Telegram credentials) is present in the same directory as the executable, or that the required environment variables are set in your session. Then, execute the compiled binary from your terminal with the necessary flags:
+## 📱 Bot Commands & Features
 
-```bash
-# Example:
-./amul-stock-notifier --monitored-skus="LASCP61_30,DBDCP42_30" --check-interval="45m" --timezone="Asia/Kolkata"
+### 🎮 Basic Commands
+- `/start` - Welcome message and main menu
+- `/help` - Comprehensive help information
+- `/menu` - Access the main menu anytime
+- `/mystatus` - Quick access to your subscription status
 
-# Minimal example (will use default check interval of 60m, quiet hours disabled):
-./amul-stock-notifier --monitored-skus="SKU1,SKU2"
+### 🧭 Navigation Flow
+
+```
+🏠 Main Menu
+├── 🛍️ Browse Products
+│   ├── 🥤 Milkshakes (4 products)
+│   ├── 🧀 Paneer (2 products)
+│   ├── 💪 Whey Protein (6 products)
+│   ├── 🥛 Buttermilk (1 product)
+│   ├── 🍯 Lassi (2 products)
+│   └── 🥛 Milk (2 products)
+├── 📊 My Status
+│   └── View all subscriptions with stock status and location
+├── ⚙️ Manage Subscriptions
+│   └── Easy unsubscribe interface
+├── 📍 Change Location
+│   └── Update your region for personalized availability
+└── ❓ Help
+    └── Detailed usage instructions
 ```
 
-**Command-line Flags:**
+### 🎯 Product Interaction
 
-- `--monitored-skus`: (Required) Comma-separated string of product SKUs to monitor.
-  - Example: `--monitored-skus="HPMCP01_32,WPCCP03_01"`
-- `--check-interval`: (Optional) Interval at which to check stock. Go `time.Duration` string.
-  - Default: `60m` (60 minutes)
-  - Examples: `--check-interval="30m"`, `--check-interval="1h15m"`
-- `--timezone`: (Optional) Timezone for quiet hours calculation (e.g., "America/New_York", "Asia/Kolkata", "UTC").
-  - If not provided or invalid, quiet hours functionality will be disabled.
-  - Quiet hours are fixed from 00:00 to 07:00 in the specified timezone.
-  - Example: `--timezone="Asia/Kolkata"`
+When you select a product, you'll see:
+- **📝 Product Name**: Full product description
+- **🏷️ SKU**: Product identification code
+- **📂 Category**: Product category with emoji
+- **📊 Stock Status**: Real-time availability
+- **🔔 Subscription Status**: Whether you're subscribed
+- **🔄 Quick Actions**: Subscribe/Unsubscribe buttons
 
-The application will log its activities to the console.
+## 🔔 Notification Examples
+
+### ✅ Stock Available Notification
+```
+🎉 Stock Alert!
+
+💪 Amul Whey Protein, 32 g | Pack of 30 Sachets is now IN STOCK!
+
+📊 Details:
+• Quantity Available: 15
+• SKU: WPCCP01_01
+• Category: 💪 Whey Protein
+
+🛒 Order now before it runs out!
+
+🔗 View on Amul Shop
+```
+
+### ❌ Out of Stock Notification
+```
+😔 Stock Update
+
+🥤 Amul Kool Protein Milkshake | Chocolate, 180 mL | Pack of 30 is now OUT OF STOCK
+
+SKU: DBDCP44_30
+Category: 🥤 Milkshakes
+
+📬 Don't worry! You'll be notified as soon as it's back in stock.
+```
+
+## 🏗️ Architecture
+
+### 📁 File Structure
+```
+cmd/
+└── main.go                 # Main application entry point
+
+internal/
+├── bot/
+│   ├── bot.go              # Stock checking & notification logic
+│   └── interactive_bot.go  # Interactive UI & user management
+└── config/
+    └── config.go           # Configuration management
+```
+
+### 🔄 Component Interaction
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│  Interactive    │    │   Stock Bot      │    │   Amul API      │
+│     Bot         │◄──►│                  │◄──►│                 │
+│                 │    │                  │    │                 │
+│ • User Management   │ • Stock Checking │    │ • Product Data  │
+│ • UI/UX         │    │ • Cookie Mgmt    │    │ • Availability  │
+│ • Notifications │    │ • API Requests   │    │                 │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+```
+
+## ⚙️ Configuration Options
+
+### 🚩 Command Line Flags
+- `--check-interval`: How often to check stock (default: 60m)
+- `--timezone`: Timezone for quiet hours (e.g., "Asia/Kolkata")
+- `--monitored-skus`: Legacy fallback SKU list (not needed for interactive mode)
+
+### 🌙 Quiet Hours
+- **Default**: 00:00 - 07:00 in specified timezone
+- **Behavior**: Notifications are suppressed during quiet hours
+- **Override**: Set timezone to disable quiet hours
+
+## 📊 Available Products
+
+| Category | Count | Examples |
+|----------|-------|----------|
+| 🥤 Milkshakes | 4 | Chocolate, Coffee, Kesar, Blueberry |
+| 🧀 Paneer | 2 | High Protein Paneer (2-pack, 24-pack) |
+| 💪 Whey Protein | 6 | Regular & Chocolate (various pack sizes) |
+| 🥛 Buttermilk | 1 | High Protein Buttermilk |
+| 🍯 Lassi | 2 | Plain & Rose Lassi |
+| 🥛 Milk | 2 | High Protein Milk (8-pack, 32-pack) |
+
+## 🔧 Development
+
+### 🛠️ Build Commands
+```bash
+# Build the application
+make build
+
+# Run the application
+make run
+
+# Run with live reload
+make watch
+```
+
+### 🧪 Testing
+```bash
+# Run tests
+make test
+
+# Clean builds
+make clean
+```
+
+## 🤝 Usage Tips
+
+### 👑 Best Practices
+1. **Start with `/start`**: Get familiar with the interface
+2. **Browse by Category**: Organized browsing is easier
+3. **Check Status Regularly**: Use "My Status" to see stock updates
+4. **Manage Subscriptions**: Remove products you're no longer interested in
+
+### 🎯 Pro Tips
+- **Quick Access**: Send any message to get the main menu
+- **Stock Indicators**: ✅ = In Stock, ❌ = Out of Stock, 🔍 = Checking
+- **Instant Updates**: Changes are saved immediately
+- **Rich Text**: Use copy button on SKUs for easy reference
+
+## 🆚 What's New
+
+This bot provides a completely interactive experience compared to traditional CLI-based stock checkers:
+
+| Feature | Traditional CLI | This Bot |
+|---------|-------------|-----------------|
+| User Interface | Command line flags | Beautiful Telegram UI |
+| User Management | Single admin | Multi-user support |
+| Product Selection | Manual SKU entry | Visual browsing |
+| Subscription Management | Global config | Individual preferences |
+| Notifications | Fixed recipient | Per-user targeting |
+| Ease of Use | Technical | User-friendly |
+
+## 🚨 Troubleshooting
+
+### Common Issues
+
+1. **Bot Not Responding**:
+   - Check your `TELEGRAM_BOT_TOKEN`
+   - Ensure bot is started with `/start`
+
+2. **No Notifications**:
+   - Verify you're subscribed to products
+   - Check if it's during quiet hours
+
+3. **Products Not Loading**:
+   - Check internet connection
+   - Verify Amul API accessibility
+
+### 📝 Logs
+The bot provides detailed logging:
+- 🤖 Bot authorization
+- 📝 User interactions
+- 🖱️ Button callbacks  
+- 📤 Notification sending
+- 💾 Data persistence
+
+## 🔮 Future Enhancements
+
+- 📊 **Analytics Dashboard**: Usage statistics
+- 🔍 **Search Functionality**: Search products by name
+- 🏷️ **Price Tracking**: Price change notifications
+- 📱 **Mobile App**: Native mobile experience
+- 🌐 **Web Interface**: Browser-based management
+- 🤖 **AI Integration**: Smart product recommendations
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+**🎉 Enjoy your enhanced Amul protein stock notifications with the beautiful interactive interface!** 

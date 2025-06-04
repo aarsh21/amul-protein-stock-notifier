@@ -1,0 +1,17 @@
+{
+  "734151169": {
+    "user_id": 734151169,
+    "username": "manager_uwu",
+    "monitored_skus": {
+      "HPMCP01_08": true,
+      "LASCP40_30": true,
+      "LASCP61_30": true
+    },
+    "location": "Uttar Pradesh",
+    "store_code": "uttar_pradesh",
+    "notification_frequency": "every_30_minutes",
+    "last_manual_check": "2025-06-04T17:54:10.741296308+05:30",
+    "created_at": "2025-06-04T17:32:56.498866754+05:30",
+    "updated_at": "2025-06-04T17:56:04.822219365+05:30"
+  }
+}
